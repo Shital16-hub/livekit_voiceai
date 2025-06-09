@@ -195,3 +195,10 @@ Thumbs.db
 *.tmp
 .secret
 .secrets
+
+# Project specific folders
+rag/data/
+data/
+
+# Voice AI Agent specific paths
+voice_ai_1/rag/data/
