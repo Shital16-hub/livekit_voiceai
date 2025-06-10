@@ -1,4 +1,4 @@
-"""Generic RAG Manager for any knowledge domain"""
+"""Generic RAG Manager for any knowledge domain - FIXED VERSION"""
 import asyncio
 import time
 import logging
@@ -18,7 +18,7 @@ from config import RAG_CONFIG, QDRANT_CONFIG, CACHE_CONFIG
 logger = logging.getLogger(__name__)
 
 class GenericRAGManager:
-    """Generic RAG manager that works with any knowledge domain"""
+    """Generic RAG manager that works with any knowledge domain - FIXED"""
     
     def __init__(self):
         self.query_cache = {}
@@ -31,29 +31,33 @@ class GenericRAGManager:
         self.cache_hits = 0
         self.total_queries = 0
         
+        # Print debug info
+        logger.info(f"🔧 RAG Manager created with timeout: {RAG_CONFIG.get('query_timeout', 'NOT SET')} seconds")
+        
     async def initialize(self):
-        """Initialize generic RAG system"""
+        """Initialize generic RAG system with FIXED timeout configuration"""
         try:
             start_time = time.time()
             
-            # Configure LlamaIndex with generic settings
+            # FIXED: LlamaIndex OpenAI expects simple float timeout, NOT httpx.Timeout
             Settings.llm = OpenAI(
                 model=RAG_CONFIG["llm_model"],
                 temperature=RAG_CONFIG["temperature"],
                 max_tokens=RAG_CONFIG["max_tokens"],
-                timeout=30.0,
+                timeout=30.0,  # Simple float - FIXED
             )
             
             Settings.embed_model = OpenAIEmbedding(
                 model=RAG_CONFIG["embedding_model"],
                 embed_batch_size=RAG_CONFIG["embedding_batch_size"],
-                timeout=30.0,
+                timeout=30.0,  # Simple float - FIXED
             )
             
             Settings.chunk_size = RAG_CONFIG["chunk_size"]
             Settings.chunk_overlap = RAG_CONFIG["chunk_overlap"]
             
-            # Setup Qdrant clients
+            # Setup Qdrant clients with increased timeouts
+            logger.info("Connecting to Qdrant...")
             self.qdrant_client = QdrantClient(
                 url=QDRANT_CONFIG["url"],
                 api_key=QDRANT_CONFIG["api_key"],
@@ -68,7 +72,13 @@ class GenericRAGManager:
                 prefer_grpc=QDRANT_CONFIG["prefer_grpc"]
             )
             
+            # Test connection
+            logger.info("Testing Qdrant connection...")
+            collections = self.qdrant_client.get_collections()
+            logger.info(f"✅ Connected to Qdrant: {len(collections.collections)} collections")
+            
             # Create vector store
+            logger.info("Creating vector store...")
             self.vector_store = QdrantVectorStore(
                 client=self.qdrant_client,
                 aclient=self.async_qdrant_client,
@@ -77,11 +87,13 @@ class GenericRAGManager:
             )
             
             # Create index
+            logger.info("Creating vector store index...")
             self.index = VectorStoreIndex.from_vector_store(
                 vector_store=self.vector_store
             )
             
             # Create optimized query engine
+            logger.info("Creating query engine...")
             self.query_engine = self.index.as_query_engine(
                 similarity_top_k=RAG_CONFIG["similarity_top_k"],
                 response_mode="compact",
@@ -96,16 +108,21 @@ class GenericRAGManager:
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize RAG Manager: {e}")
+            import traceback
+            traceback.print_exc()
             raise
     
     async def search_knowledge(self, query: str) -> Optional[str]:
-        """Generic knowledge search that works with any domain"""
+        """Generic knowledge search with FIXED timeout handling"""
         if not self.setup_complete:
             logger.warning("RAG Manager not initialized")
             return None
             
         start_time = time.time()
         self.total_queries += 1
+        
+        # HARDCODED TIMEOUT - 5 seconds
+        SEARCH_TIMEOUT = 5.0
         
         try:
             # Check cache first
@@ -116,12 +133,14 @@ class GenericRAGManager:
                 logger.info(f"🚀 Cache hit: {elapsed:.1f}ms")
                 return cached_result
             
-            # Perform search with timeout
+            # Perform search with FIXED timeout
+            logger.info(f"🔍 Starting RAG search with {SEARCH_TIMEOUT}s timeout...")
             try:
                 response = await asyncio.wait_for(
                     self.query_engine.aquery(query),
-                    timeout=RAG_CONFIG["query_timeout"]
+                    timeout=SEARCH_TIMEOUT  # HARDCODED 5 seconds
                 )
+                logger.info("✅ RAG search completed successfully")
                 
                 # Process response
                 if response and response.source_nodes:
@@ -151,13 +170,25 @@ class GenericRAGManager:
                         
                         elapsed = (time.time() - start_time) * 1000
                         self.search_times.append(elapsed)
-                        logger.info(f"✅ RAG search completed: {elapsed:.1f}ms")
+                        logger.info(f"✅ RAG search completed: {elapsed:.1f}ms, found {len(context_parts)} results")
                         
                         return result
+                    else:
+                        elapsed = (time.time() - start_time) * 1000
+                        logger.info(f"📝 RAG search found nodes but below relevance threshold: {elapsed:.1f}ms")
+                        return None
+                else:
+                    elapsed = (time.time() - start_time) * 1000
+                    logger.info(f"📝 RAG search found no relevant nodes: {elapsed:.1f}ms")
+                    return None
                 
             except asyncio.TimeoutError:
                 elapsed = (time.time() - start_time) * 1000
                 logger.warning(f"⏰ RAG search timeout after {elapsed:.1f}ms")
+                return None
+            except Exception as search_error:
+                elapsed = (time.time() - start_time) * 1000
+                logger.error(f"❌ RAG search error after {elapsed:.1f}ms: {search_error}")
                 return None
                 
         except Exception as e:

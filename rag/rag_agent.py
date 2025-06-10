@@ -23,6 +23,7 @@ import asyncio
 import logging
 import time
 import os
+import httpx
 
 load_dotenv()
 
@@ -34,11 +35,11 @@ logger = logging.getLogger(__name__)
 _global_rag_manager = None
 
 def prewarm_process(job_process: JobProcess):
-    """MANDATORY prewarm - RAG MUST work or process fails"""
+    """OPTIMIZED prewarm - faster initialization"""
     global _global_rag_manager
     
     print("🔥 PREWARM STARTING...")
-    logger.info("🔥 PREWARM: Starting RAG initialization...")
+    logger.info("🔥 PREWARM: Starting FAST RAG initialization...")
     
     try:
         # Ensure we're in the right directory
@@ -70,12 +71,21 @@ def prewarm_process(job_process: JobProcess):
             print("🔥 PREWARM: RAG manager initialized successfully!")
             print(f"🔥 PREWARM: RAG manager type: {type(_global_rag_manager)}")
             
-            # Test it works
-            print("🔥 PREWARM: Testing RAG system...")
-            test_result = await _global_rag_manager.search_knowledge("test query")
-            print(f"🔥 PREWARM: Test search result: {test_result is not None}")
+            # SKIP TEST for faster startup
+            print("🔥 PREWARM: Skipping test search for speed...")
         
-        # Create event loop and run
+        # Use existing event loop if available
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, create task but don't wait
+                asyncio.create_task(init_rag())
+                print("🔥 PREWARM: Started async initialization...")
+                return
+        except:
+            pass
+            
+        # Create new event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -95,42 +105,106 @@ def prewarm_process(job_process: JobProcess):
         print(f"✅ PREWARM: Stored in userdata: {job_process.userdata.keys()}")
         
     except Exception as e:
-        print(f"❌ PREWARM FAILED: {e}")
-        logger.error(f"❌ PREWARM FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        raise  # Fail the prewarm
+        print(f"⚠️ PREWARM WARNING: {e}")
+        logger.warning(f"⚠️ PREWARM WARNING: {e}")
+        # Don't raise - let it initialize later
+        _global_rag_manager = None
+
+async def test_rag_system(rag_manager):
+    """Test RAG system with known queries"""
+    if not rag_manager:
+        logger.error("❌ No RAG manager available for testing")
+        return False
+    
+    test_queries = [
+        "rich dad poor dad",
+        "financial education", 
+        "money and investing",
+        "test query",
+        "sample document"
+    ]
+    
+    logger.info("🧪 Starting RAG system tests...")
+    
+    for query in test_queries:
+        logger.info(f"🧪 Testing RAG with: '{query}'")
+        try:
+            start = time.time()
+            result = await rag_manager.search_knowledge(query)
+            duration = (time.time() - start) * 1000
+            
+            if result:
+                logger.info(f"✅ RAG found result in {duration:.1f}ms: {result[:100]}...")
+                return True
+            else:
+                logger.warning(f"⚠️ RAG no result in {duration:.1f}ms for '{query}'")
+        except Exception as e:
+            logger.error(f"❌ RAG error for '{query}': {e}")
+    
+    logger.warning("⚠️ RAG tests completed - no results found for any query")
+    return False
+
+def create_fallback_llm():
+    """Create LLM with proper error handling and fallbacks"""
+    models_to_try = ["gpt-4o-mini", "gpt-3.5-turbo"]
+    
+    for model in models_to_try:
+        try:
+            logger.info(f"🤖 Trying to create LLM with model: {model}")
+            llm = openai.LLM(
+                model=model,
+                temperature=0.3,
+                timeout=httpx.Timeout(
+                    connect=15.0,
+                    read=30.0,    # 30 seconds read timeout
+                    write=10.0,
+                    pool=5.0
+                ),
+                max_retries=3,  # More retries for server errors
+            )
+            logger.info(f"✅ Successfully created LLM with {model}")
+            return llm
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to create LLM with {model}: {e}")
+            continue
+    
+    # If all fail, return basic config
+    logger.error("❌ All LLM models failed, using basic fallback")
+    return openai.LLM(model="gpt-3.5-turbo", temperature=0.3)
 
 class Assistant(Agent):
-    """RAG-powered voice assistant"""
+    """RAG-powered voice assistant with enhanced error handling"""
     
     def __init__(self, rag_manager) -> None:
         super().__init__(
-            instructions="""You are an intelligent AI assistant with access to a comprehensive knowledge base.
+            instructions="""You are an intelligent AI assistant with access to a comprehensive knowledge base about financial education and personal finance, particularly content from "Rich Dad Poor Dad" and related topics.
             
-            When users ask questions, you can search through your knowledge base to find relevant information.
-            If you find relevant information, incorporate it naturally into your response without explicitly mentioning 
-            "knowledge base" or "according to my database". Just provide helpful, accurate information.
+            When users ask questions about money, investing, financial education, assets, liabilities, or business, search through your knowledge base to find relevant information.
+            
+            If you find relevant information, incorporate it naturally into your response. If the user mentions "Rich Dad Poor Dad" or asks about financial concepts, definitely search your knowledge base.
             
             If you don't find relevant information in your knowledge base, use your general knowledge to help the user.
             
             If users ask for human support or want to be transferred, offer to transfer them to a human agent.
             
-            You can help with any topic that's in your knowledge base. Be conversational, helpful, and accurate.
-            Always provide the most relevant and useful information to answer the user's questions."""
+            Be conversational, helpful, and accurate. Always provide the most relevant and useful information to answer the user's questions."""
         )
         
         self.rag_manager = rag_manager
-        self.rag_ready = True
+        self.rag_ready = rag_manager is not None
         
-        logger.info("✅ Assistant created with working RAG system")
+        logger.info(f"✅ Assistant created with RAG system: {self.rag_ready}")
 
     async def on_user_turn_completed(
         self, 
         turn_ctx: ChatContext, 
         new_message: ChatMessage
     ) -> None:
-        """Perform knowledge search for any user query"""
+        """Perform knowledge search for relevant queries with enhanced error handling"""
+        if not self.rag_ready:
+            logger.warning("RAG system not available, skipping search")
+            return
+            
         # Fix: Handle content as list or string
         user_query = new_message.content
         
@@ -140,7 +214,7 @@ class Assistant(Agent):
         elif not isinstance(user_query, str):
             user_query = str(user_query) if user_query else ""
         
-        if not user_query or len(user_query.strip()) < 5:
+        if not user_query or len(user_query.strip()) < 3:
             return
             
         # Skip transfer requests
@@ -148,11 +222,23 @@ class Assistant(Agent):
         if any(keyword in user_query.lower() for keyword in transfer_keywords):
             return
             
+        # Only search for relevant queries (financial terms, rich dad poor dad, etc.)
+        financial_keywords = ["rich", "dad", "poor", "money", "financial", "invest", "asset", "business", "wealth", "cash", "flow"]
+        should_search = any(keyword in user_query.lower() for keyword in financial_keywords)
+        
+        if not should_search and len(user_query.split()) < 3:
+            logger.info(f"📝 Skipping RAG search for short/generic query: '{user_query}'")
+            return
+            
         rag_start = time.time()
         logger.info(f"🔍 Knowledge search for: '{user_query[:50]}...'")
         
         try:
-            knowledge_context = await self.rag_manager.search_knowledge(user_query)
+            # Hard timeout wrapper for extra safety
+            knowledge_context = await asyncio.wait_for(
+                self.rag_manager.search_knowledge(user_query),
+                timeout=10.0  # 10 second hard limit
+            )
             
             if knowledge_context:
                 enhanced_context = f"""[RELEVANT INFORMATION FROM KNOWLEDGE BASE]
@@ -169,8 +255,12 @@ Incorporate the information naturally into your answer. If the information isn't
                 rag_time = (time.time() - rag_start) * 1000
                 logger.info(f"✅ Knowledge context added: {rag_time:.1f}ms")
             else:
-                logger.info("📝 No relevant knowledge found")
+                rag_time = (time.time() - rag_start) * 1000
+                logger.info(f"📝 No relevant knowledge found: {rag_time:.1f}ms")
                 
+        except asyncio.TimeoutError:
+            rag_time = (time.time() - rag_start) * 1000
+            logger.warning(f"⏰ RAG search timeout in Assistant after {rag_time:.1f}ms - continuing without RAG")
         except Exception as e:
             rag_time = (time.time() - rag_start) * 1000
             logger.error(f"❌ Knowledge search error after {rag_time:.1f}ms: {e}")
@@ -244,34 +334,17 @@ Incorporate the information naturally into your answer. If the information isn't
                     
         except Exception as e:
             logger.error(f"❌ Error transferring call: {e}")
-            logger.error(f"🔍 Error details: {type(e).__name__}: {str(e)}")
-            
-            # Provide specific guidance based on error type
-            if "408" in str(e):
-                logger.error("💡 408 = Call reached destination but timed out waiting for answer")
-                await ctx.session.generate_reply(
-                    instructions="The call reached our human agent but they didn't answer in time. Please try again or they will call you back shortly."
-                )
-            elif "500" in str(e):
-                logger.error("💡 500 = Server error, possibly SIP configuration issue")
-                await ctx.session.generate_reply(
-                    instructions="I'm experiencing a technical issue with the transfer system. Please try again in a moment."
-                )
-            elif "404" in str(e):
-                logger.error("💡 404 = SIP address not found")
-                await ctx.session.generate_reply(
-                    instructions="I couldn't locate our human agent's phone system. Please try again later."
-                )
-            else:
-                await ctx.session.generate_reply(
-                    instructions="I apologize, but I'm having trouble transferring your call right now. Please try again in a moment."
-                )
-            
+            await ctx.session.generate_reply(
+                instructions="I apologize, but I'm having trouble transferring your call right now. Please try again in a moment."
+            )
             return f"Transfer failed: {str(e)}"
 
     @function_tool()
     async def search_knowledge(self, ctx: RunContext, query: str) -> str:
         """Search the knowledge base for specific information"""
+        if not self.rag_ready:
+            return "Knowledge base is not currently available. Let me help you with my general knowledge instead."
+            
         try:
             # Provide user feedback
             await ctx.session.generate_reply(
@@ -292,6 +365,9 @@ Incorporate the information naturally into your answer. If the information isn't
     @function_tool()
     async def get_knowledge_stats(self, ctx: RunContext) -> str:
         """Get information about the knowledge base"""
+        if not self.rag_ready:
+            return "Knowledge base is not currently available."
+            
         try:
             collection_info = await self.rag_manager.get_collection_info()
             performance_stats = self.rag_manager.get_performance_stats()
@@ -306,22 +382,8 @@ Cache Hit Rate: {performance_stats.get('cache_hit_rate', 'N/A')}"""
             logger.error(f"Error getting knowledge stats: {e}")
             return "Unable to retrieve knowledge base statistics at this time."
 
-    @function_tool()
-    async def help_commands(self, ctx: RunContext) -> str:
-        """Show available commands and capabilities"""
-        return """I'm an AI assistant with access to a knowledge base. I can help you by:
-
-- Answering questions using my knowledge base
-- Searching for specific information with 'search_knowledge'
-- Providing general assistance on any topic
-- Showing knowledge base statistics with 'get_knowledge_stats'
-- Transferring you to a human agent if needed
-
-Just ask me anything, and I'll search my knowledge base to give you the most accurate information!"""
-
-
 async def entrypoint(ctx: agents.JobContext):
-    """Main entry point"""
+    """Main entry point with comprehensive error handling and testing"""
     
     logger.info(f"=== AGENT SESSION STARTING ===")
     logger.info(f"Room: {ctx.room.name}")
@@ -351,26 +413,31 @@ async def entrypoint(ctx: agents.JobContext):
             await rag_manager.initialize()
             logger.info("✅ RAG initialized in entrypoint (slow path)")
         except Exception as e:
-            logger.error(f"💀 FATAL: Cannot initialize RAG: {e}")
-            raise Exception(f"RAG system failed: {e}")
+            logger.error(f"⚠️ WARNING: Cannot initialize RAG: {e}")
+            logger.info("🔄 Continuing without RAG - agent will use general knowledge only")
+            rag_manager = None
     
     if rag_manager is None:
-        logger.error("💀 FATAL: No RAG system available!")
-        raise Exception("RAG system not available")
-    
-    logger.info("✅ RAG system confirmed available")
-    
-    # Create session - EXACT SAME as your working telephony agent
-    session = AgentSession(
-        stt=deepgram.STT(model="nova-3", language="multi"),
+        logger.warning("⚠️ WARNING: No RAG system available - using general knowledge only")
+    else:
+        logger.info("✅ RAG system confirmed available")
         
-        llm=openai.LLM(
-            model="gpt-4o-mini",
-            temperature=0.3,
-        ),
+        # Test RAG system
+        logger.info("🧪 Testing RAG system...")
+        rag_works = await test_rag_system(rag_manager)
+        if rag_works:
+            logger.info("✅ RAG system working properly!")
+        else:
+            logger.warning("⚠️ RAG system may have issues")
+    
+    # Create session with FIXED OpenAI timeout
+    session = AgentSession(
+        stt=deepgram.STT(model="nova-2-general", language="multi"),
+        
+        llm=create_fallback_llm(),  # Use fallback function
         
         tts=openai.TTS(
-            model="tts-1",
+            model="tts-1", 
             voice="nova",
         ),
         
@@ -379,10 +446,10 @@ async def entrypoint(ctx: agents.JobContext):
         turn_detection=MultilingualModel(),
     )
 
-    # Create assistant with RAG manager
+    # Create assistant with RAG manager (can be None)
     assistant = Assistant(rag_manager)
 
-    # Start session - EXACT SAME as your working telephony agent
+    # Start session
     await session.start(
         room=ctx.room,
         agent=assistant,
@@ -395,16 +462,21 @@ async def entrypoint(ctx: agents.JobContext):
     await ctx.connect()
     logger.info("✅ Agent connected successfully")
 
-    # Send greeting
-    await session.generate_reply(
-        instructions="""Give a brief, friendly greeting. Say: "Hello! I'm your AI assistant. I can help answer questions using my knowledge base, or transfer you to a human agent if needed. How can I help you today?" Keep it short and professional."""
-    )
+    # Send greeting based on RAG availability
+    if rag_manager:
+        greeting_instructions = """Give a brief, friendly greeting. Say: "Hello! I'm your AI assistant with access to financial education knowledge including Rich Dad Poor Dad content. I can help answer questions about money, investing, and financial education, or transfer you to a human agent if needed. How can I help you today?" Keep it professional but warm."""
+    else:
+        greeting_instructions = """Give a brief, friendly greeting. Say: "Hello! I'm your AI assistant. I can help answer questions using my general knowledge, or transfer you to a human agent if needed. How can I help you today?" Keep it professional but warm."""
     
-    logger.info("✅ Initial greeting sent")
+    try:
+        await session.generate_reply(instructions=greeting_instructions)
+        logger.info("✅ Initial greeting sent")
+    except Exception as e:
+        logger.error(f"❌ Failed to send greeting: {e}")
 
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting RAG Voice Agent with Enhanced Debugging")
+    logger.info("🚀 Starting RAG Voice Agent with Enhanced Error Handling")
     logger.info("📞 Transfer destination: sip:voiceai@sip.linphone.org")
     logger.info("🧠 RAG System: Prewarmed for instant responses")
     
@@ -413,5 +485,5 @@ if __name__ == "__main__":
         agent_name="my-telephony-agent",
         prewarm_fnc=prewarm_process,
         num_idle_processes=1,
-        initialize_process_timeout=60.0,
+        initialize_process_timeout=120.0,  # Increased timeout
     ))
