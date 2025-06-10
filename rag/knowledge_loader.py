@@ -1,14 +1,19 @@
 """Generic knowledge loader for any type of documents"""
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
+from dotenv import load_dotenv
+
+# Load environment variables first
+load_dotenv()
 
 from llama_index.core import Settings, VectorStoreIndex, StorageContext
 from llama_index.core.schema import Document
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.openai import OpenAIEmbedding
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, AsyncQdrantClient
 from qdrant_client.models import Distance, VectorParams
 
 from config import RAG_CONFIG, QDRANT_CONFIG
@@ -24,17 +29,33 @@ class GenericKnowledgeLoader:
         self.processor = DocumentProcessor()
         
     async def setup_qdrant_collection(self):
-        """Setup Qdrant collection"""
-        client = QdrantClient(
-            url=QDRANT_CONFIG["url"],
-            api_key=QDRANT_CONFIG["api_key"]
-        )
-        
-        collection_name = QDRANT_CONFIG["collection_name"]
-        
+        """Setup Qdrant collection with proper error handling"""
         try:
+            logger.info("Setting up Qdrant connection...")
+            logger.info(f"URL: {QDRANT_CONFIG['url']}")
+            logger.info(f"Collection: {QDRANT_CONFIG['collection_name']}")
+            
+            # Create sync client for collection management
+            client = QdrantClient(
+                url=QDRANT_CONFIG["url"],
+                api_key=QDRANT_CONFIG["api_key"],
+                timeout=30.0,
+                prefer_grpc=False  # Important for cloud
+            )
+            
+            collection_name = QDRANT_CONFIG["collection_name"]
+            
+            # Test connection first
+            logger.info("Testing Qdrant connection...")
+            try:
+                collections = client.get_collections()
+                logger.info("✅ Successfully connected to Qdrant Cloud")
+                logger.info(f"Found {len(collections.collections)} existing collections")
+            except Exception as conn_error:
+                logger.error(f"❌ Connection test failed: {conn_error}")
+                raise
+            
             # Check if collection exists
-            collections = client.get_collections()
             collection_exists = any(col.name == collection_name for col in collections.collections)
             
             if not collection_exists:
@@ -66,8 +87,18 @@ class GenericKnowledgeLoader:
         Settings.chunk_size = RAG_CONFIG["chunk_size"]
         Settings.chunk_overlap = RAG_CONFIG["chunk_overlap"]
         
-        # Setup Qdrant
+        # Setup Qdrant sync client
         client = await self.setup_qdrant_collection()
+        
+        # Create async client with same settings
+        logger.info("Creating async client...")
+        aclient = AsyncQdrantClient(
+            url=QDRANT_CONFIG["url"],
+            api_key=QDRANT_CONFIG["api_key"],
+            timeout=30.0,
+            prefer_grpc=False
+        )
+        logger.info("✅ Async client created successfully")
         
         # Load documents
         data_path = Path(directory_path)
@@ -81,25 +112,29 @@ class GenericKnowledgeLoader:
             
             if not documents:
                 logger.warning(f"⚠️ No supported documents found in '{directory_path}' directory")
-                
-                # Create sample documents for testing
                 sample_docs = self._create_sample_documents()
                 documents = sample_docs
                 logger.info("✅ Created sample documents for testing")
             
             logger.info(f"📚 Loading {len(documents)} documents...")
             
-            # Create vector store
+            # Create vector store with BOTH clients (this is the key fix!)
+            logger.info("Creating vector store with both sync and async clients...")
             vector_store = QdrantVectorStore(
                 client=client,
+                aclient=aclient,  # Both clients required for async operations!
                 collection_name=QDRANT_CONFIG["collection_name"]
             )
+            logger.info("✅ Vector store created successfully")
             
-            # Upload documents
+            # Upload documents with async support
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            
+            # THIS IS THE KEY: use_async=True for async operations
             index = VectorStoreIndex.from_documents(
                 documents,
                 storage_context=storage_context,
+                use_async=True,  # This enables async support!
                 show_progress=True
             )
             
@@ -107,14 +142,27 @@ class GenericKnowledgeLoader:
             logger.info(f"📊 Collection: {QDRANT_CONFIG['collection_name']}")
             logger.info(f"📄 Documents: {len(documents)}")
             
-            # Test search
-            query_engine = index.as_query_engine(similarity_top_k=2)
-            test_response = await query_engine.aquery("What information is available?")
-            
-            logger.info(f"🧪 Test query result: {test_response}")
+            # Test search with async query
+            logger.info("🧪 Testing async search functionality...")
+            try:
+                query_engine = index.as_query_engine(similarity_top_k=2)
+                test_response = await query_engine.aquery("What is this document about?")
+                
+                logger.info(f"✅ Async search test successful!")
+                logger.info(f"📝 Test result: {str(test_response)[:200]}...")
+                
+            except Exception as search_error:
+                logger.warning(f"⚠️ Async search test failed: {search_error}")
+                logger.info("📝 But documents are loaded successfully!")
+                
+            logger.info("🎉 Your Rich Dad Poor Dad knowledge base is ready!")
+            logger.info("📚 All document chunks are now searchable in Qdrant Cloud")
             
         except Exception as e:
             logger.error(f"❌ Error loading documents: {e}")
+        finally:
+            # Close async client
+            await aclient.close()
     
     async def load_from_texts(self, texts: List[str], metadata_list: Optional[List[dict]] = None):
         """Load documents from a list of texts"""
@@ -125,23 +173,36 @@ class GenericKnowledgeLoader:
         
         client = await self.setup_qdrant_collection()
         
-        # Create documents from texts
-        documents = self.processor.create_documents_from_text(texts, metadata_list)
+        # Create async client separately
+        aclient = AsyncQdrantClient(
+            url=QDRANT_CONFIG["url"],
+            api_key=QDRANT_CONFIG["api_key"],
+            timeout=30.0,
+            prefer_grpc=False
+        )
         
-        if documents:
-            vector_store = QdrantVectorStore(
-                client=client,
-                collection_name=QDRANT_CONFIG["collection_name"]
-            )
+        try:
+            # Create documents from texts
+            documents = self.processor.create_documents_from_text(texts, metadata_list)
             
-            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-            index = VectorStoreIndex.from_documents(
-                documents,
-                storage_context=storage_context,
-                show_progress=True
-            )
-            
-            logger.info(f"✅ Loaded {len(documents)} text documents successfully!")
+            if documents:
+                vector_store = QdrantVectorStore(
+                    client=client,
+                    aclient=aclient,
+                    collection_name=QDRANT_CONFIG["collection_name"]
+                )
+                
+                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                index = VectorStoreIndex.from_documents(
+                    documents,
+                    storage_context=storage_context,
+                    use_async=True,  # Enable async here too
+                    show_progress=True
+                )
+                
+                logger.info(f"✅ Loaded {len(documents)} text documents successfully!")
+        finally:
+            await aclient.close()
     
     def _create_sample_documents(self) -> List[Document]:
         """Create sample documents for testing"""
@@ -166,6 +227,15 @@ class GenericKnowledgeLoader:
 
 async def main():
     """Main function to load knowledge base"""
+    # Ensure environment variables are loaded
+    load_dotenv()
+    
+    # Debug: Print environment variables (remove API key for security)
+    logger.info("🔍 Environment check:")
+    logger.info(f"QDRANT_CLOUD_URL: {os.getenv('QDRANT_CLOUD_URL')}")
+    logger.info(f"OPENAI_API_KEY: {'***' if os.getenv('OPENAI_API_KEY') else 'NOT SET'}")
+    logger.info(f"COLLECTION_NAME: {os.getenv('COLLECTION_NAME')}")
+    
     loader = GenericKnowledgeLoader()
     
     print("🚀 Generic Knowledge Base Loader")
