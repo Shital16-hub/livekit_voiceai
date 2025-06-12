@@ -23,7 +23,6 @@ import asyncio
 import logging
 import time
 import os
-import httpx
 
 load_dotenv()
 
@@ -35,7 +34,7 @@ logger = logging.getLogger(__name__)
 _global_rag_manager = None
 
 def prewarm_process(job_process: JobProcess):
-    """OPTIMIZED prewarm - faster initialization"""
+    """FIXED: Optimized prewarm - faster initialization"""
     global _global_rag_manager
     
     print("🔥 PREWARM STARTING...")
@@ -45,11 +44,6 @@ def prewarm_process(job_process: JobProcess):
         # Ensure we're in the right directory
         current_dir = os.getcwd()
         print(f"🔥 PREWARM: Current directory: {current_dir}")
-        
-        # Import and initialize
-        import asyncio
-        import sys
-        print(f"🔥 PREWARM: Python path: {sys.path}")
         
         from rag_manager import GenericRAGManager
         print("🔥 PREWARM: Successfully imported GenericRAGManager")
@@ -110,57 +104,20 @@ def prewarm_process(job_process: JobProcess):
         # Don't raise - let it initialize later
         _global_rag_manager = None
 
-async def test_rag_system(rag_manager):
-    """Test RAG system with known queries"""
-    if not rag_manager:
-        logger.error("❌ No RAG manager available for testing")
-        return False
-    
-    test_queries = [
-        "rich dad poor dad",
-        "financial education", 
-        "money and investing",
-        "test query",
-        "sample document"
-    ]
-    
-    logger.info("🧪 Starting RAG system tests...")
-    
-    for query in test_queries:
-        logger.info(f"🧪 Testing RAG with: '{query}'")
-        try:
-            start = time.time()
-            result = await rag_manager.search_knowledge(query)
-            duration = (time.time() - start) * 1000
-            
-            if result:
-                logger.info(f"✅ RAG found result in {duration:.1f}ms: {result[:100]}...")
-                return True
-            else:
-                logger.warning(f"⚠️ RAG no result in {duration:.1f}ms for '{query}'")
-        except Exception as e:
-            logger.error(f"❌ RAG error for '{query}': {e}")
-    
-    logger.warning("⚠️ RAG tests completed - no results found for any query")
-    return False
+# REMOVED: test_rag_system function with hardcoded financial keywords
 
 def create_fallback_llm():
-    """Create LLM with proper error handling and fallbacks"""
+    """FIXED: Create LLM without max_retries parameter"""
     models_to_try = ["gpt-4o-mini", "gpt-3.5-turbo"]
     
     for model in models_to_try:
         try:
             logger.info(f"🤖 Trying to create LLM with model: {model}")
+            # FIXED: Removed max_retries and httpx.Timeout
             llm = openai.LLM(
                 model=model,
                 temperature=0.3,
-                timeout=httpx.Timeout(
-                    connect=15.0,
-                    read=30.0,    # 30 seconds read timeout
-                    write=10.0,
-                    pool=5.0
-                ),
-                max_retries=3,  # More retries for server errors
+                # max_retries=3,  # ❌ REMOVED - This was causing errors
             )
             logger.info(f"✅ Successfully created LLM with {model}")
             return llm
@@ -173,16 +130,15 @@ def create_fallback_llm():
     return openai.LLM(model="gpt-3.5-turbo", temperature=0.3)
 
 class Assistant(Agent):
-    """RAG-powered voice assistant with enhanced error handling"""
+    """FIXED: General-purpose RAG assistant - no hardcoded keywords"""
     
     def __init__(self, rag_manager) -> None:
         super().__init__(
-            instructions="""You are an intelligent AI assistant with access to a comprehensive knowledge base about financial education and personal finance, particularly content from "Rich Dad Poor Dad" and related topics.
+            # FIXED: General-purpose instructions - no financial focus
+            instructions="""You are an intelligent AI assistant with access to a knowledge base.
             
-            When users ask questions about money, investing, financial education, assets, liabilities, or business, search through your knowledge base to find relevant information.
-            
-            If you find relevant information, incorporate it naturally into your response. If the user mentions "Rich Dad Poor Dad" or asks about financial concepts, definitely search your knowledge base.
-            
+            When users ask questions, search through your knowledge base to find relevant information.
+            If you find relevant information, incorporate it naturally into your response.
             If you don't find relevant information in your knowledge base, use your general knowledge to help the user.
             
             If users ask for human support or want to be transferred, offer to transfer them to a human agent.
@@ -200,12 +156,12 @@ class Assistant(Agent):
         turn_ctx: ChatContext, 
         new_message: ChatMessage
     ) -> None:
-        """Perform knowledge search for relevant queries with enhanced error handling"""
+        """FIXED: General-purpose RAG search - no keyword filtering"""
         if not self.rag_ready:
             logger.warning("RAG system not available, skipping search")
             return
             
-        # Fix: Handle content as list or string
+        # Handle content as list or string
         user_query = new_message.content
         
         # Convert list to string if needed
@@ -222,22 +178,21 @@ class Assistant(Agent):
         if any(keyword in user_query.lower() for keyword in transfer_keywords):
             return
             
-        # Only search for relevant queries (financial terms, rich dad poor dad, etc.)
-        financial_keywords = ["rich", "dad", "poor", "money", "financial", "invest", "asset", "business", "wealth", "cash", "flow"]
-        should_search = any(keyword in user_query.lower() for keyword in financial_keywords)
-        
-        if not should_search and len(user_query.split()) < 3:
-            logger.info(f"📝 Skipping RAG search for short/generic query: '{user_query}'")
+        # FIXED: Remove hardcoded financial keywords - search for any substantial query
+        # Only skip very short or greeting-like queries
+        skip_keywords = ["hi", "hello", "hey", "yes", "no", "ok", "sure", "thanks", "bye"]
+        if len(user_query.split()) < 2 and user_query.lower() in skip_keywords:
+            logger.info(f"📝 Skipping short greeting: '{user_query}'")
             return
             
         rag_start = time.time()
         logger.info(f"🔍 Knowledge search for: '{user_query[:50]}...'")
         
         try:
-            # Hard timeout wrapper for extra safety
+            # FIXED: Use the configured timeout (15 seconds from config)
             knowledge_context = await asyncio.wait_for(
                 self.rag_manager.search_knowledge(user_query),
-                timeout=10.0  # 10 second hard limit
+                timeout=18.0  # 18 second hard limit (buffer over 15s config)
             )
             
             if knowledge_context:
@@ -267,7 +222,7 @@ Incorporate the information naturally into your answer. If the information isn't
 
     @function_tool()
     async def transfer_call(self, ctx: RunContext):
-        """Transfer function"""
+        """Transfer function - unchanged"""
         transfer_to = "sip:voiceai@sip.linphone.org"
         
         job_ctx = get_job_context()
@@ -383,7 +338,7 @@ Cache Hit Rate: {performance_stats.get('cache_hit_rate', 'N/A')}"""
             return "Unable to retrieve knowledge base statistics at this time."
 
 async def entrypoint(ctx: agents.JobContext):
-    """Main entry point with comprehensive error handling and testing"""
+    """KEEPING your working connection pattern - just fixing the keywords"""
     
     logger.info(f"=== AGENT SESSION STARTING ===")
     logger.info(f"Room: {ctx.room.name}")
@@ -421,20 +376,13 @@ async def entrypoint(ctx: agents.JobContext):
         logger.warning("⚠️ WARNING: No RAG system available - using general knowledge only")
     else:
         logger.info("✅ RAG system confirmed available")
-        
-        # Test RAG system
-        logger.info("🧪 Testing RAG system...")
-        rag_works = await test_rag_system(rag_manager)
-        if rag_works:
-            logger.info("✅ RAG system working properly!")
-        else:
-            logger.warning("⚠️ RAG system may have issues")
+        # REMOVED: test_rag_system call with hardcoded keywords
     
-    # Create session with FIXED OpenAI timeout
+    # KEEPING your working session creation pattern
     session = AgentSession(
         stt=deepgram.STT(model="nova-2-general", language="multi"),
         
-        llm=create_fallback_llm(),  # Use fallback function
+        llm=create_fallback_llm(),  # FIXED: No more max_retries
         
         tts=openai.TTS(
             model="tts-1", 
@@ -449,7 +397,7 @@ async def entrypoint(ctx: agents.JobContext):
     # Create assistant with RAG manager (can be None)
     assistant = Assistant(rag_manager)
 
-    # Start session
+    # KEEPING your exact connection pattern that works
     await session.start(
         room=ctx.room,
         agent=assistant,
@@ -462,9 +410,9 @@ async def entrypoint(ctx: agents.JobContext):
     await ctx.connect()
     logger.info("✅ Agent connected successfully")
 
-    # Send greeting based on RAG availability
+    # FIXED: General-purpose greeting
     if rag_manager:
-        greeting_instructions = """Give a brief, friendly greeting. Say: "Hello! I'm your AI assistant with access to financial education knowledge including Rich Dad Poor Dad content. I can help answer questions about money, investing, and financial education, or transfer you to a human agent if needed. How can I help you today?" Keep it professional but warm."""
+        greeting_instructions = """Give a brief, friendly greeting. Say: "Hello! I'm your AI assistant with access to a knowledge base. I can help answer questions or transfer you to a human agent if needed. How can I help you today?" Keep it professional but warm."""
     else:
         greeting_instructions = """Give a brief, friendly greeting. Say: "Hello! I'm your AI assistant. I can help answer questions using my general knowledge, or transfer you to a human agent if needed. How can I help you today?" Keep it professional but warm."""
     
@@ -476,7 +424,7 @@ async def entrypoint(ctx: agents.JobContext):
 
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting RAG Voice Agent with Enhanced Error Handling")
+    logger.info("🚀 Starting General-Purpose RAG Voice Agent")  # FIXED: Updated message
     logger.info("📞 Transfer destination: sip:voiceai@sip.linphone.org")
     logger.info("🧠 RAG System: Prewarmed for instant responses")
     

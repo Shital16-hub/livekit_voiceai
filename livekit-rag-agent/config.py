@@ -31,11 +31,11 @@ class AgentConfig(BaseSettings):
     chunk_overlap: int = Field(default=30, env="CHUNK_OVERLAP")
     max_tokens: int = Field(default=150, env="MAX_TOKENS")
     top_k_results: int = Field(default=2, env="TOP_K_RESULTS")
-    similarity_threshold: float = Field(default=0.7, env="SIMILARITY_THRESHOLD")
+    similarity_threshold: float = Field(default=0.3, env="SIMILARITY_THRESHOLD")
     
     # Performance Settings
     target_latency_ms: int = Field(default=2000, env="TARGET_LATENCY_MS")
-    rag_timeout_ms: int = Field(default=400, env="RAG_TIMEOUT_MS")
+    rag_timeout_ms: int = Field(default=5000, env="RAG_TIMEOUT_MS")  # 5 seconds
     enable_caching: bool = Field(default=True, env="ENABLE_CACHING")
     log_performance: bool = Field(default=True, env="LOG_PERFORMANCE")
     

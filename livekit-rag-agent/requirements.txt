@@ -1,4 +1,4 @@
-# LiveKit Core
+# Core LiveKit Dependencies
 livekit-agents
 livekit-api
 livekit-protocol
@@ -7,7 +7,7 @@ livekit-protocol
 livekit-plugins-openai
 livekit-plugins-deepgram
 livekit-plugins-silero
-livekit-plugins-noise-cancellation
+livekit-plugins-turn-detector
 
 # RAG and AI
 llama-index
@@ -18,14 +18,16 @@ openai
 # Document Processing
 pypdf
 python-docx
-unstructured
 markdown
 
-# Utilities
+# Essential Dependencies
 python-dotenv
 pydantic-settings
 numpy
-asyncio
+
+# ML Dependencies (fixes PyTorch warning)
+torch
+transformers
 
 # Optional but recommended
 pandas
