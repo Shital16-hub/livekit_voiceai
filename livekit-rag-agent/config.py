@@ -1,5 +1,5 @@
 """
-Configuration management for LiveKit RAG Agent
+Enhanced Configuration with Advanced RAG Settings
 """
 import os
 from pathlib import Path
@@ -8,11 +8,10 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-class AgentConfig(BaseSettings):
-    """Agent configuration settings"""
+class EnhancedAgentConfig(BaseSettings):
+    """Enhanced agent configuration with advanced RAG optimizations"""
     
     # LiveKit Settings
     livekit_url: str = Field(default="", env="LIVEKIT_URL")
@@ -22,22 +21,36 @@ class AgentConfig(BaseSettings):
     # AI Service API Keys
     openai_api_key: str = Field(default="", env="OPENAI_API_KEY")
     deepgram_api_key: str = Field(default="", env="DEEPGRAM_API_KEY")
-    elevenlabs_api_key: Optional[str] = Field(default=None, env="ELEVENLABS_API_KEY")
     cartesia_api_key: Optional[str] = Field(default=None, env="CARTESIA_API_KEY")
     
-    # RAG Configuration
+    # Enhanced RAG Configuration
     embedding_model: str = Field(default="text-embedding-3-small", env="EMBEDDING_MODEL")
-    chunk_size: int = Field(default=200, env="CHUNK_SIZE")
-    chunk_overlap: int = Field(default=30, env="CHUNK_OVERLAP")
-    max_tokens: int = Field(default=150, env="MAX_TOKENS")
+    chunk_size: int = Field(default=150, env="CHUNK_SIZE")  # Smaller for voice
+    chunk_overlap: int = Field(default=20, env="CHUNK_OVERLAP")
+    max_tokens: int = Field(default=50, env="MAX_TOKENS")  # Much shorter for voice
+    
+    # Advanced RAG Settings
     top_k_results: int = Field(default=2, env="TOP_K_RESULTS")
-    similarity_threshold: float = Field(default=0.3, env="SIMILARITY_THRESHOLD")
+    similarity_threshold: float = Field(default=0.6, env="SIMILARITY_THRESHOLD")  # Higher threshold
+    enable_semantic_cache: bool = Field(default=True, env="ENABLE_SEMANTIC_CACHE")
+    enable_streaming_rag: bool = Field(default=True, env="ENABLE_STREAMING_RAG")
+    enable_parallel_processing: bool = Field(default=True, env="ENABLE_PARALLEL_PROCESSING")
     
     # Performance Settings
-    target_latency_ms: int = Field(default=2000, env="TARGET_LATENCY_MS")
-    rag_timeout_ms: int = Field(default=5000, env="RAG_TIMEOUT_MS")  # 5 seconds
-    enable_caching: bool = Field(default=True, env="ENABLE_CACHING")
-    log_performance: bool = Field(default=True, env="LOG_PERFORMANCE")
+    target_latency_ms: int = Field(default=1500, env="TARGET_LATENCY_MS")  # More aggressive
+    rag_timeout_ms: int = Field(default=300, env="RAG_TIMEOUT_MS")  # Very fast
+    cache_ttl_seconds: int = Field(default=3600, env="CACHE_TTL_SECONDS")
+    preload_common_queries: bool = Field(default=True, env="PRELOAD_COMMON_QUERIES")
+    
+    # Redis Settings for Semantic Cache
+    redis_host: str = Field(default="localhost", env="REDIS_HOST")
+    redis_port: int = Field(default=6379, env="REDIS_PORT")
+    redis_db: int = Field(default=0, env="REDIS_DB")
+    
+    # Smart Bypass Settings
+    enable_smart_bypass: bool = Field(default=True, env="ENABLE_SMART_BYPASS")
+    bypass_simple_queries: bool = Field(default=True, env="BYPASS_SIMPLE_QUERIES")
+    min_query_length: int = Field(default=4, env="MIN_QUERY_LENGTH")
     
     # SIP Transfer
     transfer_sip_address: str = Field(
@@ -59,12 +72,12 @@ class AgentConfig(BaseSettings):
         return self.project_root / "storage"
     
     @property
-    def logs_dir(self) -> Path:
-        return self.project_root / "logs"
+    def cache_dir(self) -> Path:
+        return self.project_root / "cache"
     
     def ensure_directories(self):
-        """Create necessary directories if they don't exist"""
-        for directory in [self.data_dir, self.storage_dir, self.logs_dir]:
+        """Create necessary directories"""
+        for directory in [self.data_dir, self.storage_dir, self.cache_dir]:
             directory.mkdir(exist_ok=True)
     
     class ConfigDict:
@@ -72,14 +85,11 @@ class AgentConfig(BaseSettings):
         case_sensitive = False
 
 # Global configuration instance
-config = AgentConfig()
-
-# Ensure directories exist
+config = EnhancedAgentConfig()
 config.ensure_directories()
 
-# Validation
 def validate_config():
-    """Validate required configuration settings"""
+    """Validate required configuration"""
     required_fields = [
         ("OPENAI_API_KEY", config.openai_api_key),
         ("DEEPGRAM_API_KEY", config.deepgram_api_key),
@@ -90,10 +100,4 @@ def validate_config():
     if missing_fields:
         raise ValueError(f"Missing required environment variables: {', '.join(missing_fields)}")
     
-    print("✅ Configuration validated successfully")
-
-if __name__ == "__main__":
-    validate_config()
-    print(f"📁 Data directory: {config.data_dir}")
-    print(f"💾 Storage directory: {config.storage_dir}")
-    print(f"📋 Logs directory: {config.logs_dir}")
+    print("✅ Enhanced configuration validated successfully")

@@ -1,19 +1,19 @@
 # Core LiveKit Dependencies
-livekit-agents
+livekit-agents[openai,silero,deepgram,cartesia,turn-detector]~=1.0
 livekit-api
 livekit-protocol
-
-# LiveKit Plugins
-livekit-plugins-openai
-livekit-plugins-deepgram
-livekit-plugins-silero
-livekit-plugins-turn-detector
 
 # RAG and AI
 llama-index
 llama-index-embeddings-openai
 llama-index-llms-openai
 openai
+
+# Advanced Features
+sentence-transformers
+faiss-cpu
+redis[hiredis]
+numpy
 
 # Document Processing
 pypdf
@@ -23,12 +23,11 @@ markdown
 # Essential Dependencies
 python-dotenv
 pydantic-settings
-numpy
 
-# ML Dependencies (fixes PyTorch warning)
+# Performance (optional but recommended)
 torch
 transformers
 
-# Optional but recommended
+# Monitoring
 pandas
 scipy
