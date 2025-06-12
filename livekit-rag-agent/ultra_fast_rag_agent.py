@@ -86,15 +86,43 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
                 )
                 
                 if results and len(results) > 0:
-                    context = results[0]["content"]
+                    # ✅ FIX: Clean content for voice response
+                    raw_content = results[0]["content"]
+                    context = self._clean_content_for_voice(raw_content)
                     turn_ctx.add_message(
                         role="system",
-                        content=f"[FastRAG]: {context[:200]}"  # Limit length for speed
+                        content=f"[FastRAG]: {context}"
                     )
                     logger.info("⚡ Ultra-fast RAG context injected")
                         
             finally:
                 self.processing = False
+    
+    def _clean_content_for_voice(self, content: str) -> str:
+        """Clean content for voice response"""
+        try:
+            # Remove Q: and A: prefixes for cleaner voice response
+            content = content.replace("Q: ", "").replace("A: ", "")
+            
+            # Handle multi-line content - take first meaningful sentence
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+            if lines:
+                # Take the first substantial line
+                for line in lines:
+                    if len(line) > 20 and not line.startswith(('Q:', 'A:', '#')):
+                        content = line
+                        break
+                else:
+                    content = lines[0]
+            
+            # Limit length for voice
+            if len(content) > 200:
+                content = content[:200].rsplit('.', 1)[0] + "."
+            
+            return content
+            
+        except Exception:
+            return content[:150] if len(content) > 150 else content
                 
         except asyncio.TimeoutError:
             logger.debug("⚡ RAG timeout - continuing without context")
@@ -109,7 +137,8 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
         try:
             results = await scalable_rag.quick_search(f"services {service_type}")
             if results and len(results) > 0:
-                return results[0]["content"][:150]  # Short for voice
+                content = self._clean_content_for_voice(results[0]["content"])
+                return content
             else:
                 return "We offer 24/7 AI voice assistant services. Would you like me to transfer you to a human agent for detailed information?"
         except Exception as e:
@@ -122,7 +151,8 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
         try:
             results = await scalable_rag.quick_search(query)
             if results and len(results) > 0:
-                return results[0]["content"][:150]  # Short for voice
+                content = self._clean_content_for_voice(results[0]["content"])
+                return content
             else:
                 return "I don't have specific information about that. Would you like me to transfer you to a human agent?"
         except Exception as e:
