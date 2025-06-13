@@ -1,12 +1,15 @@
 """
 ULTRA-FAST: RAG Voice Agent with Sub-2-Second Response Times
-Based on LiveKit official documentation and best practices
+FIXED: Better tool selection and transfer logic
 """
 import asyncio
 import logging
 import os
 from typing import Optional, List, Dict, Any
 import time
+
+from livekit.plugins import elevenlabs
+
 
 from livekit import agents, api
 from livekit.agents import (
@@ -53,13 +56,19 @@ class UltraFastAgent(Agent):
         super().__init__(
             instructions="""You are a helpful AI voice assistant for phone calls. 
 
-CRITICAL: Keep responses very short (under 30 words) for phone clarity.
+CRITICAL INSTRUCTIONS:
+- Keep responses very short (under 30 words) for phone clarity
+- When you receive [FastRAG] information, use it to answer questions directly
+- ONLY transfer to human when explicitly asked: "transfer me", "human agent", "speak to a person"
+- For questions about "details", "more information", "tell me about" - use search_info or get_service_info
+- NEVER transfer unless the user explicitly requests it
 
-When you receive knowledge base information in [FastRAG], use it directly to answer questions.
+AVAILABLE TOOLS:
+- get_service_info: Use for service-related questions
+- search_info: Use for general information requests, details, explanations
+- transfer_to_human: ONLY use when explicitly requested transfer
 
-For service questions, be specific about our 24/7 AI voice assistant services.
-
-Only transfer to human when explicitly requested ("transfer me", "human agent")."""
+When user asks for "details" or "more information" - always use search_info, NOT transfer_to_human."""
         )
         self.processing = False
     
@@ -75,8 +84,19 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
             self.processing = True
             
             try:
-                # Skip explicit transfer requests
-                if any(phrase in user_text.lower() for phrase in ["transfer me", "human agent", "speak to person"]):
+                # ✅ FIXED: More specific transfer detection
+                explicit_transfer_phrases = [
+                    "transfer me", 
+                    "human agent", 
+                    "speak to a person",
+                    "talk to a human",
+                    "connect me to someone",
+                    "I want to speak to someone"
+                ]
+                
+                # Skip RAG for EXPLICIT transfer requests only
+                if any(phrase in user_text.lower() for phrase in explicit_transfer_phrases):
+                    logger.info(f"🔄 Explicit transfer request detected: {user_text}")
                     return
                 
                 # ⚡ ULTRA-FAST: Get context with aggressive timeout
@@ -95,8 +115,16 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
                     )
                     logger.info("⚡ Ultra-fast RAG context injected")
                         
+            except asyncio.TimeoutError:
+                logger.debug("⚡ RAG timeout - continuing without context")
+            except Exception as e:
+                logger.error(f"❌ RAG error: {e}")
             finally:
                 self.processing = False
+                
+        except Exception as e:
+            logger.error(f"❌ on_user_turn_completed error: {e}")
+            self.processing = False
     
     def _clean_content_for_voice(self, content: str) -> str:
         """Clean content for voice response"""
@@ -123,46 +151,69 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
             
         except Exception:
             return content[:150] if len(content) > 150 else content
-                
-        except asyncio.TimeoutError:
-            logger.debug("⚡ RAG timeout - continuing without context")
-            self.processing = False
-        except Exception as e:
-            logger.error(f"❌ RAG error: {e}")
-            self.processing = False
 
     @function_tool()
     async def get_service_info(self, service_type: str = "general") -> str:
-        """Get service information quickly"""
+        """
+        Get information about our services.
+        
+        Use this when users ask about:
+        - What services do you offer
+        - Service information
+        - Business offerings
+        """
         try:
+            logger.info(f"🔍 Getting service info for: {service_type}")
             results = await scalable_rag.quick_search(f"services {service_type}")
             if results and len(results) > 0:
                 content = self._clean_content_for_voice(results[0]["content"])
                 return content
             else:
-                return "We offer 24/7 AI voice assistant services. Would you like me to transfer you to a human agent for detailed information?"
+                return "We offer comprehensive AI voice assistant services including 24/7 customer support, automated information systems, and call routing. Would you like more specific details?"
         except Exception as e:
             logger.error(f"❌ Service info error: {e}")
-            return "I can connect you with a human agent for service information."
+            return "We provide AI voice assistant services. Would you like me to search for more specific information?"
 
     @function_tool()
     async def search_info(self, query: str) -> str:
-        """Search for specific information"""
+        """
+        Search for detailed information about any topic.
+        
+        Use this when users ask for:
+        - More details
+        - Additional information
+        - Explanations
+        - Specific questions about features, pricing, etc.
+        
+        DO NOT use transfer_to_human for information requests.
+        """
         try:
+            logger.info(f"🔍 Searching for detailed info: {query}")
             results = await scalable_rag.quick_search(query)
             if results and len(results) > 0:
                 content = self._clean_content_for_voice(results[0]["content"])
                 return content
             else:
-                return "I don't have specific information about that. Would you like me to transfer you to a human agent?"
+                return "I can help with general information about our AI voice services, pricing, features, and integration options. What specific aspect would you like to know about?"
         except Exception as e:
             logger.error(f"❌ Search error: {e}")
-            return "Let me connect you with a human agent who can help."
+            return "I can provide information about our services. What specific details would you like to know?"
 
     @function_tool()
     async def transfer_to_human(self, ctx: RunContext) -> str:
-        """Transfer to human agent"""
+        """
+        Transfer the caller to a human agent.
+        
+        ONLY use this when the caller EXPLICITLY requests:
+        - "transfer me"
+        - "human agent" 
+        - "speak to a person"
+        - "talk to a human"
+        
+        DO NOT use for information requests, details, or explanations.
+        """
         try:
+            logger.info("🔄 EXECUTING HUMAN TRANSFER - User explicitly requested")
             job_ctx = get_job_context()
             
             # Find SIP participant
@@ -176,8 +227,8 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
                 return "I'm having trouble with the transfer. Please try calling back."
             
             # Quick transfer message
-            await ctx.session.generate_reply(
-                instructions="Say: 'Connecting you to an agent now.'"
+            speech_handle = ctx.session.generate_reply(
+                instructions="Say: 'Connecting you to a human agent now. Please hold on.'"
             )
             
             # Execute transfer
@@ -189,30 +240,34 @@ Only transfer to human when explicitly requested ("transfer me", "human agent").
             )
             
             await job_ctx.api.sip.transfer_sip_participant(transfer_request)
-            return "Transfer completed"
+            return "Transfer to human agent completed successfully"
             
         except Exception as e:
             logger.error(f"❌ Transfer error: {e}")
-            return "Transfer failed - please try again"
+            return "I'm having trouble with the transfer. Let me try to help you directly instead."
 
 async def create_ultra_fast_session() -> AgentSession:
     """Create ultra-fast optimized session"""
     
     # ⚡ FAST TTS: Choose fastest option
-    if CARTESIA_AVAILABLE and os.getenv("CARTESIA_API_KEY"):
-        tts_engine = cartesia.TTS(
-            model="sonic-english",
-            voice="79a125e8-cd45-4c13-8a67-188112f4dd22",
-            api_key=os.getenv("CARTESIA_API_KEY")
-        )
-        logger.info("🚀 Using Cartesia Sonic TTS (40ms)")
-    else:
-        tts_engine = openai.TTS(
-            model="tts-1",
-            voice="nova",
-            speed=1.1,  # Slightly faster
-        )
-        logger.info("⚡ Using OpenAI TTS")
+    # if CARTESIA_AVAILABLE and os.getenv("CARTESIA_API_KEY"):
+    #     tts_engine = cartesia.TTS(
+    #         model="sonic-english",
+    #         voice="79a125e8-cd45-4c13-8a67-188112f4dd22",
+    #         api_key=os.getenv("CARTESIA_API_KEY")
+    #     )
+    #     logger.info("🚀 Using Cartesia Sonic TTS (40ms)")
+    # else:
+    #     tts_engine = openai.TTS(
+    #         model="tts-1",
+    #         voice="nova",
+    #         speed=1.1,  # Slightly faster
+    #     )
+    tts_engine=elevenlabs.TTS(
+      voice_id="ODq5zmih8GrVes37Dizd",
+      model="eleven_multilingual_v2"
+   )
+    logger.info("⚡ Using elevenlabs TTS")
     
     session = AgentSession(
         # ⚡ FAST STT: Use general model for reliability
@@ -224,7 +279,7 @@ async def create_ultra_fast_session() -> AgentSession:
         # ⚡ FAST LLM: Optimized settings
         llm=openai.LLM(
             model="gpt-4o-mini",
-            temperature=0.0,  # More deterministic = faster
+            temperature=0.1,  # Slightly higher for more natural responses
         ),
         
         tts=tts_engine,
@@ -249,7 +304,7 @@ async def entrypoint(ctx: JobContext):
     
     # ⚡ PARALLEL: Initialize everything at once
     init_tasks = [
-        fast_rag.initialize(),
+        scalable_rag.initialize(),
         create_ultra_fast_session()
     ]
     
@@ -261,10 +316,11 @@ async def entrypoint(ctx: JobContext):
     # ⚡ START: Begin session immediately
     await session.start(room=ctx.room, agent=agent)
     
-    # ⚡ QUICK GREETING: Send immediately
-    asyncio.create_task(
-        session.generate_reply(instructions="Say: 'Hi! How can I help you today?'")
+    # ✅ FIXED: Based on official LiveKit documentation examples
+    await session.generate_reply(
+        instructions="Greet the user and offer your assistance."
     )
+    logger.info("✅ Initial greeting sent")
     
     logger.info("⚡ ULTRA-FAST AGENT READY!")
     logger.info(f"⚡ RAG Status: {'✅ Active' if rag_success else '⚠️ Fallback'}")
