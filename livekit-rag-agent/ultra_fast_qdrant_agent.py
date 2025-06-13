@@ -1,15 +1,13 @@
+# ultra_fast_qdrant_agent.py
 """
-ULTRA-FAST: RAG Voice Agent with Sub-2-Second Response Times
-FIXED: Better tool selection and transfer logic
+Ultra-Fast LiveKit RAG Agent with Qdrant Integration
+Generic version that adapts to any knowledge base content
 """
 import asyncio
 import logging
 import os
 from typing import Optional, List, Dict, Any
 import time
-
-from livekit.plugins import elevenlabs
-
 
 from livekit import agents, api
 from livekit.agents import (
@@ -24,32 +22,21 @@ from livekit.agents import (
     WorkerOptions,
     cli
 )
-from livekit.plugins import openai, deepgram, silero
-
-try:
-    from livekit.plugins import cartesia
-    CARTESIA_AVAILABLE = True
-except ImportError:
-    CARTESIA_AVAILABLE = False
-
-try:
-    from livekit.plugins.turn_detector.multilingual import MultilingualModel
-except ImportError:
-    MultilingualModel = None
+from livekit.plugins import openai, deepgram, silero, elevenlabs
 
 from dotenv import load_dotenv
 load_dotenv()
 
-# ✅ SCALABLE RAG: Import the real system
-from scalable_fast_rag import scalable_rag
+from qdrant_rag_system import qdrant_rag
+from config import config
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class UltraFastAgent(Agent):
+class UltraFastQdrantAgent(Agent):
     """
-    ✅ ULTRA-FAST: Agent optimized for sub-2-second responses
+    Ultra-fast LiveKit agent with Qdrant RAG integration
+    Generic version that works with any knowledge base
     """
     
     def __init__(self) -> None:
@@ -58,23 +45,23 @@ class UltraFastAgent(Agent):
 
 CRITICAL INSTRUCTIONS:
 - Keep responses very short (under 30 words) for phone clarity
-- When you receive [FastRAG] information, use it to answer questions directly
+- When you receive [QdrantRAG] information, use it to answer questions directly and accurately
 - ONLY transfer to human when explicitly asked: "transfer me", "human agent", "speak to a person"
-- For questions about "details", "more information", "tell me about" - use search_info or get_service_info
-- NEVER transfer unless the user explicitly requests it
+- For questions about details, information, or explanations - use search_knowledge
+- Always base your answers on the retrieved knowledge when available
+- If no relevant information is found, politely say you don't have that specific information
 
 AVAILABLE TOOLS:
-- get_service_info: Use for service-related questions
-- search_info: Use for general information requests, details, explanations
+- search_knowledge: Use for ALL information requests, questions, and details
 - transfer_to_human: ONLY use when explicitly requested transfer
 
-When user asks for "details" or "more information" - always use search_info, NOT transfer_to_human."""
+Always search for information first before giving generic responses."""
         )
         self.processing = False
     
     async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
         """
-        ⚡ ULTRA-FAST: RAG injection with <200ms target
+        Ultra-fast RAG injection with <150ms target using Qdrant
         """
         try:
             user_text = new_message.text_content
@@ -84,7 +71,7 @@ When user asks for "details" or "more information" - always use search_info, NOT
             self.processing = True
             
             try:
-                # ✅ FIXED: More specific transfer detection
+                # Skip RAG for explicit transfer requests
                 explicit_transfer_phrases = [
                     "transfer me", 
                     "human agent", 
@@ -94,26 +81,25 @@ When user asks for "details" or "more information" - always use search_info, NOT
                     "I want to speak to someone"
                 ]
                 
-                # Skip RAG for EXPLICIT transfer requests only
                 if any(phrase in user_text.lower() for phrase in explicit_transfer_phrases):
                     logger.info(f"🔄 Explicit transfer request detected: {user_text}")
                     return
                 
-                # ⚡ ULTRA-FAST: Get context with aggressive timeout
+                # Ultra-fast Qdrant search with aggressive timeout
                 results = await asyncio.wait_for(
-                    scalable_rag.quick_search(user_text),
-                    timeout=0.15  # 150ms max
+                    qdrant_rag.search(user_text, limit=2),
+                    timeout=config.rag_timeout_ms / 1000.0
                 )
                 
                 if results and len(results) > 0:
-                    # ✅ FIX: Clean content for voice response
-                    raw_content = results[0]["content"]
+                    # Clean content for voice response
+                    raw_content = results[0]["text"]
                     context = self._clean_content_for_voice(raw_content)
                     turn_ctx.add_message(
                         role="system",
-                        content=f"[FastRAG]: {context}"
+                        content=f"[QdrantRAG]: {context}"
                     )
-                    logger.info("⚡ Ultra-fast RAG context injected")
+                    logger.info("⚡ Ultra-fast Qdrant RAG context injected")
                         
             except asyncio.TimeoutError:
                 logger.debug("⚡ RAG timeout - continuing without context")
@@ -129,15 +115,16 @@ When user asks for "details" or "more information" - always use search_info, NOT
     def _clean_content_for_voice(self, content: str) -> str:
         """Clean content for voice response"""
         try:
-            # Remove Q: and A: prefixes for cleaner voice response
+            # Remove common formatting characters
             content = content.replace("Q: ", "").replace("A: ", "")
+            content = content.replace("■", "").replace("●", "").replace("•", "")
             
-            # Handle multi-line content - take first meaningful sentence
+            # Handle multi-line content
             lines = [line.strip() for line in content.split('\n') if line.strip()]
             if lines:
-                # Take the first substantial line
+                # Take the first substantial line that's not a header
                 for line in lines:
-                    if len(line) > 20 and not line.startswith(('Q:', 'A:', '#')):
+                    if len(line) > 15 and not line.startswith(('Q:', 'A:', '#', '-', '*')):
                         content = line
                         break
                 else:
@@ -145,7 +132,11 @@ When user asks for "details" or "more information" - always use search_info, NOT
             
             # Limit length for voice
             if len(content) > 200:
-                content = content[:200].rsplit('.', 1)[0] + "."
+                sentences = content.split('.')
+                if len(sentences) > 1:
+                    content = sentences[0] + "."
+                else:
+                    content = content[:200] + "..."
             
             return content
             
@@ -153,51 +144,41 @@ When user asks for "details" or "more information" - always use search_info, NOT
             return content[:150] if len(content) > 150 else content
 
     @function_tool()
-    async def get_service_info(self, service_type: str = "general") -> str:
+    async def search_knowledge(self, query: str) -> str:
         """
-        Get information about our services.
+        Search the knowledge base for information about any topic.
         
-        Use this when users ask about:
-        - What services do you offer
-        - Service information
-        - Business offerings
+        Use this for ALL information requests including:
+        - Service information and pricing
+        - Company details and policies
+        - Procedures and guidelines
+        - Specific questions about any topic
+        - General inquiries
         """
         try:
-            logger.info(f"🔍 Getting service info for: {service_type}")
-            results = await scalable_rag.quick_search(f"services {service_type}")
+            logger.info(f"🔍 Searching knowledge base: {query}")
+            results = await qdrant_rag.search(query, limit=3)
+            
             if results and len(results) > 0:
-                content = self._clean_content_for_voice(results[0]["content"])
+                # Use the best matching result
+                best_result = results[0]
+                content = self._clean_content_for_voice(best_result["text"])
+                
+                # If the first result isn't very relevant, try combining with second
+                if len(results) > 1 and best_result["score"] < 0.7:
+                    second_content = self._clean_content_for_voice(results[1]["text"])
+                    if len(content) + len(second_content) < 150:  # Keep it short for voice
+                        content = f"{content} {second_content}"
+                
+                logger.info(f"📊 Found result with score: {best_result['score']:.3f}")
                 return content
             else:
-                return "We offer comprehensive AI voice assistant services including 24/7 customer support, automated information systems, and call routing. Would you like more specific details?"
+                logger.warning("⚠️ No relevant information found in knowledge base")
+                return "I don't have specific information about that in my knowledge base. Would you like me to transfer you to someone who can help?"
+            
         except Exception as e:
-            logger.error(f"❌ Service info error: {e}")
-            return "We provide AI voice assistant services. Would you like me to search for more specific information?"
-
-    @function_tool()
-    async def search_info(self, query: str) -> str:
-        """
-        Search for detailed information about any topic.
-        
-        Use this when users ask for:
-        - More details
-        - Additional information
-        - Explanations
-        - Specific questions about features, pricing, etc.
-        
-        DO NOT use transfer_to_human for information requests.
-        """
-        try:
-            logger.info(f"🔍 Searching for detailed info: {query}")
-            results = await scalable_rag.quick_search(query)
-            if results and len(results) > 0:
-                content = self._clean_content_for_voice(results[0]["content"])
-                return content
-            else:
-                return "I can help with general information about our AI voice services, pricing, features, and integration options. What specific aspect would you like to know about?"
-        except Exception as e:
-            logger.error(f"❌ Search error: {e}")
-            return "I can provide information about our services. What specific details would you like to know?"
+            logger.error(f"❌ Knowledge search error: {e}")
+            return "I'm having trouble accessing the information right now. Let me transfer you to someone who can help."
 
     @function_tool()
     async def transfer_to_human(self, ctx: RunContext) -> str:
@@ -210,7 +191,7 @@ When user asks for "details" or "more information" - always use search_info, NOT
         - "speak to a person"
         - "talk to a human"
         
-        DO NOT use for information requests, details, or explanations.
+        DO NOT use for information requests - use search_knowledge instead.
         """
         try:
             logger.info("🔄 EXECUTING HUMAN TRANSFER - User explicitly requested")
@@ -227,7 +208,7 @@ When user asks for "details" or "more information" - always use search_info, NOT
                 return "I'm having trouble with the transfer. Please try calling back."
             
             # Quick transfer message
-            speech_handle = ctx.session.generate_reply(
+            await ctx.session.generate_reply(
                 instructions="Say: 'Connecting you to a human agent now. Please hold on.'"
             )
             
@@ -235,7 +216,7 @@ When user asks for "details" or "more information" - always use search_info, NOT
             transfer_request = api.TransferSIPParticipantRequest(
                 room_name=job_ctx.room.name,
                 participant_identity=sip_participant.identity,
-                transfer_to=os.getenv("TRANSFER_SIP_ADDRESS", "sip:voiceai@sip.linphone.org"),
+                transfer_to=config.transfer_sip_address,
                 play_dialtone=True,
             )
             
@@ -247,87 +228,91 @@ When user asks for "details" or "more information" - always use search_info, NOT
             return "I'm having trouble with the transfer. Let me try to help you directly instead."
 
 async def create_ultra_fast_session() -> AgentSession:
-    """Create ultra-fast optimized session"""
+    """Create ultra-fast optimized session with ElevenLabs TTS"""
     
-    # ⚡ FAST TTS: Choose fastest option
-    # if CARTESIA_AVAILABLE and os.getenv("CARTESIA_API_KEY"):
-    #     tts_engine = cartesia.TTS(
-    #         model="sonic-english",
-    #         voice="79a125e8-cd45-4c13-8a67-188112f4dd22",
-    #         api_key=os.getenv("CARTESIA_API_KEY")
-    #     )
-    #     logger.info("🚀 Using Cartesia Sonic TTS (40ms)")
-    # else:
-    #     tts_engine = openai.TTS(
-    #         model="tts-1",
-    #         voice="nova",
-    #         speed=1.1,  # Slightly faster
-    #     )
-    tts_engine=elevenlabs.TTS(
-      voice_id="ODq5zmih8GrVes37Dizd",
-      model="eleven_multilingual_v2"
-   )
-    logger.info("⚡ Using elevenlabs TTS")
+    # Configure ElevenLabs TTS with optimized settings
+    tts_engine = elevenlabs.TTS(
+        voice_id="ODq5zmih8GrVes37Dizd",  # Professional voice
+        model="eleven_flash_v2_5",  # Fastest model
+        language="en",
+        voice_settings=elevenlabs.VoiceSettings(
+            stability=0.5,
+            similarity_boost=0.8,
+            style=0.2,
+            use_speaker_boost=True,
+            speed=1.0  # Natural speech speed
+        ),
+    )
+    logger.info("🎙️ Using ElevenLabs TTS with optimized telephony settings")
     
     session = AgentSession(
-        # ⚡ FAST STT: Use general model for reliability
+        # Fast STT
         stt=deepgram.STT(
             model="nova-2-general",
             language="en",
         ),
         
-        # ⚡ FAST LLM: Optimized settings
+        # Fast LLM
         llm=openai.LLM(
             model="gpt-4o-mini",
-            temperature=0.1,  # Slightly higher for more natural responses
+            temperature=0.1,
         ),
         
+        # ElevenLabs TTS
         tts=tts_engine,
         
-        # ⚡ FAST VAD: Default settings
+        # Fast VAD
         vad=silero.VAD.load(),
         
-        turn_detection=MultilingualModel() if MultilingualModel else None,
+        # Use STT-based turn detection (more reliable)
+        turn_detection="stt",
+        
+        # Optimized timing for telephony
+        min_endpointing_delay=0.3,
+        max_endpointing_delay=2.0,
+        allow_interruptions=True,
+        min_interruption_duration=0.3,
     )
     
     return session
 
 async def entrypoint(ctx: JobContext):
     """
-    ⚡ ULTRA-FAST: Optimized entrypoint
+    Ultra-fast entrypoint with Qdrant RAG and ElevenLabs TTS
     """
-    logger.info("=== ULTRA-FAST RAG AGENT STARTING ===")
+    logger.info("=== GENERIC QDRANT RAG AGENT WITH ELEVENLABS STARTING ===")
     
     # Connect immediately
     await ctx.connect()
     logger.info("✅ Connected")
     
-    # ⚡ PARALLEL: Initialize everything at once
+    # Initialize Qdrant RAG and session in parallel
     init_tasks = [
-        scalable_rag.initialize(),
+        qdrant_rag.initialize(),
         create_ultra_fast_session()
     ]
     
     rag_success, session = await asyncio.gather(*init_tasks)
     
     # Create agent
-    agent = UltraFastAgent()
+    agent = UltraFastQdrantAgent()
     
-    # ⚡ START: Begin session immediately
+    # Start session
     await session.start(room=ctx.room, agent=agent)
     
-    # ✅ FIXED: Based on official LiveKit documentation examples
+    # Generic greeting that works for any business
     await session.generate_reply(
-        instructions="Greet the user and offer your assistance."
+        instructions="Greet the user professionally and ask how you can help them today."
     )
     logger.info("✅ Initial greeting sent")
     
-    logger.info("⚡ ULTRA-FAST AGENT READY!")
-    logger.info(f"⚡ RAG Status: {'✅ Active' if rag_success else '⚠️ Fallback'}")
+    logger.info("⚡ GENERIC QDRANT RAG AGENT READY!")
+    logger.info(f"⚡ Qdrant RAG Status: {'✅ Active' if rag_success else '⚠️ Fallback'}")
+    logger.info("🎙️ ElevenLabs TTS Status: ✅ Active")
 
 if __name__ == "__main__":
     try:
-        logger.info("⚡ Starting Ultra-Fast RAG Agent")
+        logger.info("⚡ Starting Generic Qdrant RAG Agent with ElevenLabs")
         
         cli.run_app(WorkerOptions(
             entrypoint_fnc=entrypoint,
