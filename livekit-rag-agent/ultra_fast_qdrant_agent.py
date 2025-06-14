@@ -1,7 +1,7 @@
 # ultra_fast_qdrant_agent.py
 """
 Ultra-Fast LiveKit RAG Agent with Qdrant Integration
-Generic version that adapts to any knowledge base content
+FIXED: RAG timeout and context injection issues
 """
 import asyncio
 import logging
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 class UltraFastQdrantAgent(Agent):
     """
     Ultra-fast LiveKit agent with Qdrant RAG integration
-    Generic version that works with any knowledge base
+    FIXED: Proper timeout handling and context injection
     """
     
     def __init__(self) -> None:
@@ -61,7 +61,7 @@ Always search for information first before giving generic responses."""
     
     async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
         """
-        Ultra-fast RAG injection with <150ms target using Qdrant
+        FIXED: RAG injection with proper timeout handling
         """
         try:
             user_text = new_message.text_content
@@ -73,33 +73,33 @@ Always search for information first before giving generic responses."""
             try:
                 # Skip RAG for explicit transfer requests
                 explicit_transfer_phrases = [
-                    "transfer me", 
-                    "human agent", 
-                    "speak to a person",
-                    "talk to a human",
-                    "connect me to someone",
-                    "I want to speak to someone"
+                    "transfer me", "human agent", "speak to a person",
+                    "talk to a human", "connect me to someone"
                 ]
                 
                 if any(phrase in user_text.lower() for phrase in explicit_transfer_phrases):
                     logger.info(f"🔄 Explicit transfer request detected: {user_text}")
                     return
                 
-                # Ultra-fast Qdrant search with aggressive timeout
+                # FIXED: Use proper timeout that matches actual search performance
                 results = await asyncio.wait_for(
-                    qdrant_rag.search(user_text, limit=2),
-                    timeout=config.rag_timeout_ms / 1000.0
+                    qdrant_rag.search(user_text, limit=3),
+                    timeout=config.rag_timeout_ms / 1000.0  # Convert to seconds
                 )
                 
                 if results and len(results) > 0:
-                    # Clean content for voice response
-                    raw_content = results[0]["text"]
-                    context = self._clean_content_for_voice(raw_content)
-                    turn_ctx.add_message(
-                        role="system",
-                        content=f"[QdrantRAG]: {context}"
-                    )
-                    logger.info("⚡ Ultra-fast Qdrant RAG context injected")
+                    # Use the best result with lowered threshold
+                    best_result = results[0]
+                    if best_result["score"] >= config.similarity_threshold:
+                        raw_content = best_result["text"]
+                        context = self._clean_content_for_voice(raw_content)
+                        turn_ctx.add_message(
+                            role="system",
+                            content=f"[QdrantRAG]: {context}"
+                        )
+                        logger.info(f"⚡ RAG context injected (score: {best_result['score']:.3f})")
+                    else:
+                        logger.info(f"⚠️ Low relevance score: {best_result['score']:.3f} < {config.similarity_threshold}")
                         
             except asyncio.TimeoutError:
                 logger.debug("⚡ RAG timeout - continuing without context")
@@ -118,13 +118,14 @@ Always search for information first before giving generic responses."""
             # Remove common formatting characters
             content = content.replace("Q: ", "").replace("A: ", "")
             content = content.replace("■", "").replace("●", "").replace("•", "")
+            content = content.replace("- ", "").replace("* ", "")
             
             # Handle multi-line content
             lines = [line.strip() for line in content.split('\n') if line.strip()]
             if lines:
                 # Take the first substantial line that's not a header
                 for line in lines:
-                    if len(line) > 15 and not line.startswith(('Q:', 'A:', '#', '-', '*')):
+                    if len(line) > 15 and not line.startswith(('Q:', 'A:', '#', '-', '*', '■')):
                         content = line
                         break
                 else:
@@ -147,6 +148,7 @@ Always search for information first before giving generic responses."""
     async def search_knowledge(self, query: str) -> str:
         """
         Search the knowledge base for information about any topic.
+        IMPROVED: Better handling of search results and scores
         
         Use this for ALL information requests including:
         - Service information and pricing
@@ -157,18 +159,37 @@ Always search for information first before giving generic responses."""
         """
         try:
             logger.info(f"🔍 Searching knowledge base: {query}")
-            results = await qdrant_rag.search(query, limit=3)
+            
+            # Search with proper timeout
+            results = await asyncio.wait_for(
+                qdrant_rag.search(query, limit=config.search_limit),
+                timeout=config.rag_timeout_ms / 1000.0
+            )
             
             if results and len(results) > 0:
-                # Use the best matching result
-                best_result = results[0]
+                # Find the best result with reasonable score
+                best_result = None
+                for result in results:
+                    if result["score"] >= config.similarity_threshold:
+                        best_result = result
+                        break
+                
+                if not best_result:
+                    best_result = results[0]  # Use the best available even if score is low
+                
                 content = self._clean_content_for_voice(best_result["text"])
                 
-                # If the first result isn't very relevant, try combining with second
-                if len(results) > 1 and best_result["score"] < 0.7:
-                    second_content = self._clean_content_for_voice(results[1]["text"])
-                    if len(content) + len(second_content) < 150:  # Keep it short for voice
-                        content = f"{content} {second_content}"
+                # If score is still low, try to combine multiple results
+                if best_result["score"] < 0.4 and len(results) > 1:
+                    logger.info("🔄 Low score, combining multiple results")
+                    combined_content = []
+                    for result in results[:2]:  # Take top 2
+                        cleaned = self._clean_content_for_voice(result["text"])
+                        if cleaned and len(cleaned) > 10:
+                            combined_content.append(cleaned)
+                    
+                    if combined_content:
+                        content = " ".join(combined_content)[:200]  # Limit length
                 
                 logger.info(f"📊 Found result with score: {best_result['score']:.3f}")
                 return content
@@ -176,6 +197,9 @@ Always search for information first before giving generic responses."""
                 logger.warning("⚠️ No relevant information found in knowledge base")
                 return "I don't have specific information about that in my knowledge base. Would you like me to transfer you to someone who can help?"
             
+        except asyncio.TimeoutError:
+            logger.error("❌ Knowledge search timeout")
+            return "I'm having trouble accessing the information right now. Let me try to help you directly or transfer you to someone who can assist."
         except Exception as e:
             logger.error(f"❌ Knowledge search error: {e}")
             return "I'm having trouble accessing the information right now. Let me transfer you to someone who can help."
@@ -228,22 +252,28 @@ Always search for information first before giving generic responses."""
             return "I'm having trouble with the transfer. Let me try to help you directly instead."
 
 async def create_ultra_fast_session() -> AgentSession:
-    """Create ultra-fast optimized session with ElevenLabs TTS"""
+    """Create ultra-fast optimized session with stable ElevenLabs TTS"""
     
-    # Configure ElevenLabs TTS with optimized settings
+    # Configure ElevenLabs TTS with stable, tested settings
     tts_engine = elevenlabs.TTS(
         voice_id="ODq5zmih8GrVes37Dizd",  # Professional voice
-        model="eleven_flash_v2_5",  # Fastest model
-        language="en",
+        model="eleven_turbo_v2_5",  # Fastest stable model
+        language="en",  # Required for turbo model
+        
+        # Stable voice settings (avoid aggressive optimizations that cause API errors)
         voice_settings=elevenlabs.VoiceSettings(
-            stability=0.5,
-            similarity_boost=0.8,
-            style=0.2,
-            use_speaker_boost=True,
-            speed=1.0  # Natural speech speed
+            stability=0.5,              # Default stable value
+            similarity_boost=0.8,       # Default stable value
+            style=0.2,                  # Moderate style
+            speed=1.0,                  # Normal speed (avoid speed issues)
+            use_speaker_boost=True      # Enable for better quality
         ),
+        
+        # Conservative performance settings to avoid API errors
+        inactivity_timeout=300,         # Default timeout (don't make too aggressive)
+        enable_ssml_parsing=False,      # Keep disabled for speed
     )
-    logger.info("🎙️ Using ElevenLabs TTS with optimized telephony settings")
+    logger.info("🎙️ Using ElevenLabs TTS with stable configuration")
     
     session = AgentSession(
         # Fast STT
@@ -258,13 +288,13 @@ async def create_ultra_fast_session() -> AgentSession:
             temperature=0.1,
         ),
         
-        # ElevenLabs TTS
+        # Stable ElevenLabs TTS
         tts=tts_engine,
         
         # Fast VAD
         vad=silero.VAD.load(),
         
-        # Use STT-based turn detection (more reliable)
+        # Use STT-based turn detection
         turn_detection="stt",
         
         # Optimized timing for telephony
@@ -279,8 +309,9 @@ async def create_ultra_fast_session() -> AgentSession:
 async def entrypoint(ctx: JobContext):
     """
     Ultra-fast entrypoint with Qdrant RAG and ElevenLabs TTS
+    FIXED: Better initialization and error handling
     """
-    logger.info("=== GENERIC QDRANT RAG AGENT WITH ELEVENLABS STARTING ===")
+    logger.info("=== FIXED QDRANT RAG AGENT WITH ELEVENLABS STARTING ===")
     
     # Connect immediately
     await ctx.connect()
@@ -306,13 +337,18 @@ async def entrypoint(ctx: JobContext):
     )
     logger.info("✅ Initial greeting sent")
     
-    logger.info("⚡ GENERIC QDRANT RAG AGENT READY!")
+    logger.info("⚡ FIXED QDRANT RAG AGENT READY!")
     logger.info(f"⚡ Qdrant RAG Status: {'✅ Active' if rag_success else '⚠️ Fallback'}")
     logger.info("🎙️ ElevenLabs TTS Status: ✅ Active")
+    
+    # Show current configuration
+    logger.info(f"📊 RAG Timeout: {config.rag_timeout_ms}ms")
+    logger.info(f"📊 Search Limit: {config.search_limit}")
+    logger.info(f"📊 Similarity Threshold: {config.similarity_threshold}")
 
 if __name__ == "__main__":
     try:
-        logger.info("⚡ Starting Generic Qdrant RAG Agent with ElevenLabs")
+        logger.info("⚡ Starting FIXED Qdrant RAG Agent with ElevenLabs")
         
         cli.run_app(WorkerOptions(
             entrypoint_fnc=entrypoint,

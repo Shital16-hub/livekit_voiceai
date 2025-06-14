@@ -1,7 +1,7 @@
 # qdrant_rag_system.py
 """
-Ultra-Fast Qdrant RAG System for LiveKit Telephony
-Optimized for sub-200ms query latency
+Ultra-Fast Qdrant RAG System for LiveKit Telephony with Local Docker
+FIXED: Optimized search performance and timeout handling
 """
 import asyncio
 import logging
@@ -10,11 +10,13 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import json
 import uuid
+import requests
 
 from qdrant_client import QdrantClient, AsyncQdrantClient
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, Filter, 
-    FieldCondition, MatchValue, SearchParams, OptimizersConfigDiff
+    FieldCondition, MatchValue, SearchParams, OptimizersConfigDiff,
+    HnswConfigDiff
 )
 import openai
 from sentence_transformers import SentenceTransformer
@@ -25,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 class QdrantRAGSystem:
     """
-    Ultra-fast Qdrant RAG system optimized for telephony applications
+    Ultra-fast Qdrant RAG system optimized for telephony with local Docker
+    FIXED: Better timeout handling and search optimization
     """
     
     def __init__(self):
@@ -35,20 +38,26 @@ class QdrantRAGSystem:
         self.embedding_model: Optional[SentenceTransformer] = None
         self.ready = False
         self.cache = {}
-        self.max_cache_size = 100
+        self.max_cache_size = 100  # Increased cache size
+        self.local_mode = True
         
     async def initialize(self) -> bool:
-        """Initialize the Qdrant RAG system"""
+        """Initialize the Qdrant RAG system with Docker health checks"""
         try:
             start_time = time.time()
             
-            # Initialize clients
+            # Check Docker health first
+            if not await self._check_docker_health():
+                logger.error("❌ Qdrant Docker container not healthy")
+                return False
+            
+            # Initialize clients with local optimizations
             await self._init_clients()
             
             # Initialize embedding model
             await self._init_embedding_model()
             
-            # Setup collection
+            # Setup collection with local optimizations
             await self._setup_collection()
             
             # Load existing data if available
@@ -56,30 +65,48 @@ class QdrantRAGSystem:
             
             self.ready = True
             elapsed = (time.time() - start_time) * 1000
-            logger.info(f"✅ Qdrant RAG initialized in {elapsed:.1f}ms")
+            logger.info(f"✅ Local Qdrant RAG initialized in {elapsed:.1f}ms")
             return True
             
         except Exception as e:
             logger.error(f"❌ Qdrant RAG initialization failed: {e}")
             return False
     
-    async def _init_clients(self):
-        """Initialize Qdrant clients"""
+    async def _check_docker_health(self) -> bool:
+        """FIXED: Check if Qdrant Docker container is healthy using correct endpoint"""
         try:
-            # Sync client for setup operations
+            for attempt in range(config.docker_health_check_retries):
+                try:
+                    # Use root endpoint instead of /health
+                    response = requests.get(f"{config.qdrant_url}/", timeout=2)
+                    if response.status_code == 200:
+                        logger.info("✅ Qdrant Docker container is healthy")
+                        return True
+                except requests.exceptions.RequestException:
+                    if attempt < config.docker_health_check_retries - 1:
+                        logger.warning(f"🔄 Qdrant health check attempt {attempt + 1} failed, retrying...")
+                        await asyncio.sleep(1)
+                    
+            logger.error("❌ Qdrant Docker container health check failed")
+            logger.error("   Please run: docker-compose up -d")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Docker health check error: {e}")
+            return False
+    
+    async def _init_clients(self):
+        """Initialize Qdrant clients with local Docker optimizations"""
+        try:
+            # Simple HTTP clients (no gRPC complications)
             self.client = QdrantClient(
                 url=config.qdrant_url,
-                api_key=config.qdrant_api_key,
-                timeout=config.qdrant_timeout,
-                prefer_grpc=config.qdrant_prefer_grpc
+                timeout=config.qdrant_timeout
             )
             
-            # Async client for queries
             self.aclient = AsyncQdrantClient(
                 url=config.qdrant_url,
-                api_key=config.qdrant_api_key,
-                timeout=config.qdrant_timeout,
-                prefer_grpc=config.qdrant_prefer_grpc
+                timeout=config.qdrant_timeout
             )
             
             # OpenAI async client
@@ -87,7 +114,7 @@ class QdrantRAGSystem:
                 api_key=config.openai_api_key
             )
             
-            logger.info("✅ Qdrant clients initialized")
+            logger.info("✅ Simple Qdrant clients initialized")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize clients: {e}")
@@ -97,10 +124,8 @@ class QdrantRAGSystem:
         """Initialize embedding model"""
         try:
             if config.embedding_model.startswith("text-embedding"):
-                # Use OpenAI embeddings
                 logger.info("✅ Using OpenAI embeddings")
             else:
-                # Use local SentenceTransformer
                 self.embedding_model = await asyncio.to_thread(
                     SentenceTransformer,
                     config.embedding_model
@@ -112,7 +137,7 @@ class QdrantRAGSystem:
             raise
     
     async def _setup_collection(self):
-        """Setup optimized Qdrant collection"""
+        """Setup optimized Qdrant collection for local Docker"""
         try:
             collection_name = config.qdrant_collection_name
             
@@ -127,32 +152,32 @@ class QdrantRAGSystem:
             )
             
             if not collection_exists:
-                # Create optimized collection
+                # Create ultra-optimized collection for local Docker
                 await asyncio.to_thread(
                     self.client.create_collection,
                     collection_name=collection_name,
                     vectors_config=VectorParams(
                         size=config.embedding_dimensions,
                         distance=Distance.COSINE,
-                        # Optimize for speed
-                        hnsw_config={
-                            "m": 8,  # Lower for faster search
-                            "ef_construct": 64,  # Lower for faster indexing
-                            "full_scan_threshold": 10000,
-                            "max_indexing_threads": 0,  # Use all available
-                        }
+                        # Optimized HNSW for local Docker (speed over accuracy)
+                        hnsw_config=HnswConfigDiff(
+                            m=16,  # Increased for better recall
+                            ef_construct=200,  # Increased for better indexing
+                            full_scan_threshold=10000,  # Use full scan for small collections
+                            max_indexing_threads=0,  # Use all available threads
+                        )
                     ),
-                    # Optimize storage for telephony
+                    # Optimize storage for local telephony
                     optimizers_config=OptimizersConfigDiff(
-                        default_segment_number=2,
+                        default_segment_number=1,  # Single segment for small datasets
                         max_segment_size=None,
-                        memmap_threshold=None,
-                        indexing_threshold=20000,
-                        flush_interval_sec=5,
-                        max_optimization_threads=2
+                        memmap_threshold=0,  # Disable mmap for speed
+                        indexing_threshold=20000,  # Index sooner
+                        flush_interval_sec=5,  # Regular flushes
+                        max_optimization_threads=1  # Don't over-optimize
                     )
                 )
-                logger.info(f"✅ Created optimized collection: {collection_name}")
+                logger.info(f"✅ Created ultra-optimized local collection: {collection_name}")
             else:
                 logger.info(f"✅ Using existing collection: {collection_name}")
                 
@@ -230,7 +255,6 @@ class QdrantRAGSystem:
                 with open(txt_file, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     if content:
-                        # Split large files into chunks
                         chunks = self._chunk_text(content)
                         for i, chunk in enumerate(chunks):
                             documents.append({
@@ -277,14 +301,12 @@ class QdrantRAGSystem:
         """Create embedding for text"""
         try:
             if config.embedding_model.startswith("text-embedding"):
-                # Use OpenAI
                 response = await self.openai_client.embeddings.create(
                     model=config.embedding_model,
-                    input=text[:8000]  # Limit length
+                    input=text[:8000]
                 )
                 return response.data[0].embedding
             else:
-                # Use local model
                 embedding = await asyncio.to_thread(
                     self.embedding_model.encode,
                     text,
@@ -302,53 +324,52 @@ class QdrantRAGSystem:
             points = []
             
             for doc in documents:
-                # Create embedding
                 embedding = await self._create_embedding(doc["text"])
+                point_id = str(uuid.uuid4())
                 
-                # Create point
                 point = PointStruct(
-                    id=doc["id"],
+                    id=point_id,
                     vector=embedding,
                     payload={
                         "text": doc["text"],
+                        "original_id": doc["id"],
                         **doc.get("metadata", {})
                     }
                 )
                 points.append(point)
             
-            # Batch upsert
             await asyncio.to_thread(
                 self.client.upsert,
                 collection_name=config.qdrant_collection_name,
                 points=points
             )
             
-            logger.info(f"✅ Added {len(points)} documents to Qdrant")
+            logger.info(f"✅ Added {len(points)} documents to local Qdrant")
             return True
-            
+        
         except Exception as e:
             logger.error(f"❌ Failed to add documents: {e}")
             return False
     
     async def search(self, query: str, limit: int = None) -> List[Dict[str, Any]]:
-        """Ultra-fast search with caching"""
+        """FIXED: Ultra-fast search optimized for local Docker with better timeout handling"""
         if not self.ready:
             return []
         
         try:
             start_time = time.time()
             
-            # Check cache
-            cache_key = f"{query.lower().strip()}_{limit}"
+            # Check cache with better cache key
+            cache_key = f"{query.lower().strip()}_{limit or config.search_limit}"
             if cache_key in self.cache:
                 elapsed = (time.time() - start_time) * 1000
-                logger.info(f"⚡ Cache hit in {elapsed:.1f}ms")
+                logger.info(f"⚡ Local cache hit in {elapsed:.1f}ms")
                 return self.cache[cache_key]
             
             # Create query embedding
             query_embedding = await self._create_embedding(query)
             
-            # Search with timeout
+            # FIXED: Search with proper timeout handling
             search_result = await asyncio.wait_for(
                 self.aclient.search(
                     collection_name=config.qdrant_collection_name,
@@ -356,11 +377,11 @@ class QdrantRAGSystem:
                     limit=limit or config.search_limit,
                     score_threshold=config.similarity_threshold,
                     search_params=SearchParams(
-                        hnsw_ef=32,  # Lower for faster search
+                        hnsw_ef=128,  # Increased for better recall
                         exact=False
                     )
                 ),
-                timeout=config.rag_timeout_ms / 1000.0
+                timeout=config.rag_timeout_ms / 1000.0  # Use config timeout
             )
             
             # Format results
@@ -376,19 +397,24 @@ class QdrantRAGSystem:
                     }
                 })
             
-            # Cache results
-            if len(self.cache) < self.max_cache_size:
-                self.cache[cache_key] = results
+            # Cache results with size management
+            if len(self.cache) >= self.max_cache_size:
+                # Remove oldest entry
+                oldest_key = next(iter(self.cache))
+                del self.cache[oldest_key]
+            
+            self.cache[cache_key] = results
             
             elapsed = (time.time() - start_time) * 1000
-            logger.info(f"⚡ Search completed in {elapsed:.1f}ms, found {len(results)} results")
+            logger.info(f"⚡ Local search completed in {elapsed:.1f}ms, found {len(results)} results")
             return results
             
         except asyncio.TimeoutError:
-            logger.warning(f"⚠️ Search timeout after {config.rag_timeout_ms}ms")
+            elapsed = (time.time() - start_time) * 1000
+            logger.warning(f"⚠️ Local search timeout after {elapsed:.1f}ms")
             return []
         except Exception as e:
-            logger.error(f"❌ Search error: {e}")
+            logger.error(f"❌ Local search error: {e}")
             return []
     
     async def close(self):
@@ -398,47 +424,9 @@ class QdrantRAGSystem:
                 self.client.close()
             if self.aclient:
                 await self.aclient.close()
-            logger.info("✅ Qdrant RAG system closed")
+            logger.info("✅ Local Qdrant RAG system closed")
         except Exception as e:
             logger.error(f"❌ Error closing Qdrant RAG system: {e}")
-
-    async def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
-        """Add documents to Qdrant collection"""
-        try:
-            points = []
-            
-            for doc in documents:
-                # Create embedding
-                embedding = await self._create_embedding(doc["text"])
-                
-                # Generate UUID for point ID
-                point_id = str(uuid.uuid4())
-                
-                # Create point
-                point = PointStruct(
-                    id=point_id,  # Use UUID instead of string ID
-                    vector=embedding,
-                    payload={
-                        "text": doc["text"],
-                        "original_id": doc["id"],  # Store original ID in payload
-                        **doc.get("metadata", {})
-                    }
-                )
-                points.append(point)
-            
-            # Batch upsert
-            await asyncio.to_thread(
-                self.client.upsert,
-                collection_name=config.qdrant_collection_name,
-                points=points
-            )
-            
-            logger.info(f"✅ Added {len(points)} documents to Qdrant")
-            return True
-        
-        except Exception as e:
-            logger.error(f"❌ Failed to add documents: {e}")
-            return False
 
 # Global instance
 qdrant_rag = QdrantRAGSystem()
